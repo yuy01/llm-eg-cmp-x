@@ -38,6 +38,7 @@ CSV_PATH = None
 
 # 【新增配置】指定需要下载的预测类别
 # 在这里定义需要筛选的 predicted_class，可以有多个
+# 如果留空 []，在CSV模式下表示不筛选类别，全部匹配
 TARGET_PREDICTED_CLASSES = [] 
 
 # TARGET_PREDICTED_CLASSES = ["cld_bottle_pillow"] 
@@ -60,6 +61,32 @@ SKIP_PRE_CHECK = True
 # True: 即使文件存在也重新下载（常用于修复损坏文件或更新图片）。
 # False: 如果文件存在则跳过（节省带宽和时间）。
 FORCE_OVERWRITE = False
+
+# 【新增配置】指定JSON中图片链接的字段名
+# 你的新数据是 "img_url"，旧数据可能是 "img_orgn_url"
+# 请在此处定义，后续代码将使用这个变量
+IMG_URL_KEY = "img_url" 
+# IMG_URL_KEY = "img_orgn_url" 
+
+# 【新增配置】 是否下载所有数据（忽略infer_label和分数筛选）
+# True: 不管标签是white还是其他，也不管分数多少，JSON里有什么就下载什么
+# False: 按照 infer_label 和 WHITE_TOP_SCORE 逻辑筛选
+DOWNLOAD_ALL_DATA = True 
+
+# 【新增配置】 IDX 范围筛选 (idx通常为整数)
+# 如果不想按idx筛选，请将以下两个变量设置为 None
+# 示例：只下载 idx 为 1 到 50 的数据 -> IDX_MIN = 1, IDX_MAX = 50
+IDX_MIN = 1       # 起始 idx (包含)
+IDX_MAX = 10      # 结束 idx (包含)
+# 若要关闭 idx 筛选，请解开下面两行注释：
+# IDX_MIN = None
+# IDX_MAX = None
+
+# 【新增配置】 是否在文件名前添加 idx (例如: 1_sn123_img.jpg)
+# True: 添加 idx_ 前缀 (前提是数据中有idx字段)
+# False: 不添加
+ADD_IDX_TO_FILENAME = True
+ADD_IDX_TO_FILENAME = False
 # ===========================================
 
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -68,7 +95,7 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 #     """
 #     根据item信息生成本地保存的绝对路径。
 #     """
-#     img_url = item.get('img_orgn_url')
+#     img_url = item.get(IMG_URL_KEY)
 #     if not img_url:
 #         return None
     
@@ -82,8 +109,11 @@ def get_save_path(item, save_dir):
     """
     根据item信息生成本地保存的绝对路径。
     【修改】强制使用 goods_sn 命名图片
+    【修改】支持在文件名前添加 idx
+    【修改】支持根据 label 建立子文件夹
     """
-    img_url = item.get('img_orgn_url')
+    # 【修改】使用配置的 IMG_URL_KEY 获取链接
+    img_url = item.get(IMG_URL_KEY)
     goods_sn = item.get('goods_sn')
 
     # 如果没有图片链接或没有sn号，则无法正确命名，跳过
@@ -103,8 +133,24 @@ def get_save_path(item, save_dir):
     name_without_ext = os.path.splitext(url_base_name_clean)[0]
     
     # 4. 强制拼接 .jpg 后缀
+    # 基础文件名
     filename = f"{goods_sn}_{name_without_ext}.jpg"
     
+    # 【新增逻辑】如果开启了添加IDX且数据中有idx，则拼接到最前面
+    if ADD_IDX_TO_FILENAME:
+        idx = item.get('idx')
+        if idx is not None:
+            filename = f"{idx}_{filename}"
+    
+    # 【新增逻辑】处理 label 文件夹
+    # 获取 label 字段
+    label = item.get('label')
+    if label:
+        # 清洗 label 名称，防止包含非法字符（如 / 或 \），将其替换为下划线
+        safe_label_name = str(label).replace('/', '_').replace('\\', '_').strip()
+        # 将保存路径指向子文件夹
+        save_dir = os.path.join(save_dir, safe_label_name)
+
     return os.path.join(save_dir, filename)
 
 def get_sns_from_csv(csv_path, target_classes):
@@ -126,7 +172,8 @@ def get_sns_from_csv(csv_path, target_classes):
                 p_class = row.get('predicted_class', '').strip()
                 
                 # 2. 判断是否在目标类别中
-                if p_class not in target_classes:
+                # 【修改】如果 target_classes 不为空，才进行筛选；为空则默认全部包含
+                if target_classes and p_class not in target_classes:
                     continue
                 
                 # 3. 获取文件名
@@ -157,7 +204,8 @@ def download_one(item):
     """
     下载单张图片
     """
-    img_url = item.get('img_orgn_url')
+    # 【修改】使用配置的 IMG_URL_KEY 获取链接
+    img_url = item.get(IMG_URL_KEY)
     if not img_url:
         return
 
@@ -166,6 +214,11 @@ def download_one(item):
         save_path = get_save_path(item, SAVE_DIR)
         if not save_path:
             return
+        
+        # 【新增逻辑】确保子文件夹存在（因为路径现在包含了label子目录）
+        save_folder = os.path.dirname(save_path)
+        if not os.path.exists(save_folder):
+            os.makedirs(save_folder, exist_ok=True)
         
         # 【修改逻辑】如果不强制覆盖，且文件存在且大小大于0，则跳过
         if not FORCE_OVERWRITE:
@@ -221,8 +274,25 @@ def collect_items(source_path, target_sns=None):
 
                 filtered = []
                 for item in  data:# 加上了 data 和冒号
-                    if not isinstance(item, dict) or not item.get('img_orgn_url'):
+                    # 【修改】这里使用 IMG_URL_KEY 来判断是否有图片链接
+                    if not isinstance(item, dict) or not item.get(IMG_URL_KEY):
                         continue
+
+                    # ==================== IDX 筛选逻辑 ====================
+                    # 获取当前item的idx
+                    item_idx = item.get('idx')
+                    
+                    # 仅当 用户设置了范围 且 当前数据存在idx 时，才进行判断
+                    if IDX_MIN is not None and IDX_MAX is not None and item_idx is not None:
+                        try:
+                            val = int(item_idx)
+                            # 如果不在范围内，则跳过
+                            if not (IDX_MIN <= val <= IDX_MAX):
+                                continue
+                        except ValueError:
+                            # 如果idx转不成数字，默认忽略该条件，继续下载（防止漏下）
+                            pass
+                    # ====================================================
                     
                     goods_sn = str(item.get('goods_sn', ''))
 
@@ -234,6 +304,11 @@ def collect_items(source_path, target_sns=None):
                         continue # CSV模式下，只要SN对上就加入，不看label，直接进入下一个循环
 
                     # logic branch 2: 原有逻辑 (White标签筛选)
+                    # 【修改】如果开启了 DOWNLOAD_ALL_DATA，则直接加入下载队列，忽略标签判断
+                    if DOWNLOAD_ALL_DATA:
+                        filtered.append(item)
+                        continue
+
                     infer_label = item.get('infer_label')
                     if infer_label != 'white':
                         # 非white标签的图片，直接下载
@@ -276,11 +351,23 @@ def main():
     print(f"处理路径: {target_source}")
     print(f"保存文件夹: {SAVE_DIR}")
     if target_sns_set is None:
-        print(f"White标签筛选区间: {WHITE_TOP_SCORE_MIN} - {WHITE_TOP_SCORE_MAX}")
+        if DOWNLOAD_ALL_DATA:
+            print("筛选模式: [全量下载] 忽略标签和分数，下载所有内容")
+        else:
+            print(f"筛选模式: White标签筛选区间: {WHITE_TOP_SCORE_MIN} - {WHITE_TOP_SCORE_MAX}")
     else:
-        print(f"筛选模式: 仅下载 CSV 中类别为 {TARGET_PREDICTED_CLASSES} 的 {len(target_sns_set)} 个 SN")
+        print(f"筛选模式: 仅下载 CSV 中类别为 {TARGET_PREDICTED_CLASSES if TARGET_PREDICTED_CLASSES else 'ALL'} 的 {len(target_sns_set)} 个 SN")
+    
+    # 打印 IDX 筛选状态
+    if IDX_MIN is not None and IDX_MAX is not None:
+        print(f"IDX 范围: {IDX_MIN} - {IDX_MAX} (包含)")
+    else:
+        print("IDX 范围: 不筛选 (全量或不存在 idx)")
+
     print(f"跳过本地预检: {SKIP_PRE_CHECK}")
     print(f"强制覆盖下载: {FORCE_OVERWRITE}")
+    print(f"图片字段Key : {IMG_URL_KEY}")
+    print(f"文件名加IDX : {ADD_IDX_TO_FILENAME}")
     print("="*50)
 
     # 1. 收集所有符合业务逻辑的条目 (传入 target_source 和 可能存在的 target_sns_set)
@@ -289,7 +376,8 @@ def main():
     # 统计各标签的数量
     label_stats = {}
     for item in target_items:
-        label = item.get('infer_label', 'unknown')
+        # 优先取 infer_label，取不到取 label，都取不到则 unknown
+        label = item.get('infer_label') or item.get('label') or 'unknown'
         label_stats[label] = label_stats.get(label, 0) + 1
     
     print("\n[标签统计]:")
