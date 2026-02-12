@@ -15,6 +15,7 @@ JSON_DIR = "/home/hadoop/data/cldfeed/data_clean/data_cldfeed/cld_bottle_black_a
 SAVE_DIR = "/home/hadoop/data/cldfeed/dinov3/inference_results/infer_01281338/black_pictures"
 SAVE_DIR = "/home/hadoop/data/cldfeed/data_clean/data_cldfeed/json_download/sample_datas_1_0128_infer"
 SAVE_DIR = "/Users/10294814/task/cldfeed/abner/data_clean/data_cldfeed/audit_result_0202"
+SAVE_DIR = "/home/hadoop/data/share/abner/realdata/realdata_high_0208"
 
 # 【新增功能】指定单个JSON文件路径
 # 如果这个变量不为 None 且路径存在，脚本将忽略 JSON_DIR，只处理这个文件
@@ -26,6 +27,7 @@ SINGLE_JSON_PATH = "/home/hadoop/data/cldfeed/data_clean/data_cldfeed/20260126.j
 SINGLE_JSON_PATH = "/home/hadoop/data/cldfeed/data_clean/data_cldfeed/20260122.json" # 解除注释以启用单文件模式
 SINGLE_JSON_PATH = "/home/hadoop/data/cldfeed/data_clean/data_cldfeed/sample_datas_1.json" # 解除注释以启用单文件模式
 SINGLE_JSON_PATH = "/Users/10294814/task/cldfeed/abner/data_clean/data_cldfeed/audit_result_0202.json" # 解除注释以启用单文件模式
+SINGLE_JSON_PATH = "/home/hadoop/data/share/abner/data/20260208.json"
 
 # 【新增功能】指定CSV文件路径（基于推理结果下载）
 # 如果这个变量不为 None 且路径存在，脚本将：
@@ -66,7 +68,7 @@ FORCE_OVERWRITE = False
 # 你的新数据是 "img_url"，旧数据可能是 "img_orgn_url"
 # 请在此处定义，后续代码将使用这个变量
 IMG_URL_KEY = "img_url" 
-# IMG_URL_KEY = "img_orgn_url" 
+IMG_URL_KEY = "img_orgn_url" 
 
 # 【新增配置】 是否下载所有数据（忽略infer_label和分数筛选）
 # True: 不管标签是white还是其他，也不管分数多少，JSON里有什么就下载什么
@@ -76,17 +78,23 @@ DOWNLOAD_ALL_DATA = True
 # 【新增配置】 IDX 范围筛选 (idx通常为整数)
 # 如果不想按idx筛选，请将以下两个变量设置为 None
 # 示例：只下载 idx 为 1 到 50 的数据 -> IDX_MIN = 1, IDX_MAX = 50
-IDX_MIN = 1       # 起始 idx (包含)
-IDX_MAX = 10      # 结束 idx (包含)
+IDX_MIN = 3001       # 起始 idx (包含)
+IDX_MAX = 6000       # 结束 idx (包含)
 # 若要关闭 idx 筛选，请解开下面两行注释：
-# IDX_MIN = None
-# IDX_MAX = None
+IDX_MIN = None
+IDX_MAX = None
 
 # 【新增配置】 是否在文件名前添加 idx (例如: 1_sn123_img.jpg)
 # True: 添加 idx_ 前缀 (前提是数据中有idx字段)
 # False: 不添加
-ADD_IDX_TO_FILENAME = True
+# ADD_IDX_TO_FILENAME = True
 ADD_IDX_TO_FILENAME = False
+
+# 【新增配置】 设置最大下载数量
+# None: 不限制下载数量，下载所有符合条件的图片
+# 整数: 限制最多下载的图片数量（例如: 100 表示最多下载100张）
+MAX_DOWNLOAD_COUNT = None
+MAX_DOWNLOAD_COUNT = 100000  # 取消注释并设置数值以限制下载数量
 # ===========================================
 
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -368,6 +376,10 @@ def main():
     print(f"强制覆盖下载: {FORCE_OVERWRITE}")
     print(f"图片字段Key : {IMG_URL_KEY}")
     print(f"文件名加IDX : {ADD_IDX_TO_FILENAME}")
+    if MAX_DOWNLOAD_COUNT is not None:
+        print(f"最大下载数量: {MAX_DOWNLOAD_COUNT}")
+    else:
+        print(f"最大下载数量: 不限制")
     print("="*50)
 
     # 1. 收集所有符合业务逻辑的条目 (传入 target_source 和 可能存在的 target_sns_set)
@@ -405,6 +417,11 @@ def main():
                 existing_count += 1
             else:
                 need_download_items.append(item)
+
+    # 【新增逻辑】根据 MAX_DOWNLOAD_COUNT 限制下载数量
+    if MAX_DOWNLOAD_COUNT is not None and len(need_download_items) > MAX_DOWNLOAD_COUNT:
+        print(f"\n提示: 当前符合条件的图片有 {len(need_download_items)} 张，但设置了最大下载数量为 {MAX_DOWNLOAD_COUNT}，将只下载前 {MAX_DOWNLOAD_COUNT} 张。")
+        need_download_items = need_download_items[:MAX_DOWNLOAD_COUNT]
 
     # 3. 打印统计信息
     print("="*50)
