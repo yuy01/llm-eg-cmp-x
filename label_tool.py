@@ -1,20 +1,44 @@
 import os
 import json
+import csv
 import socket
 from flask import Flask, render_template_string, request, jsonify, send_file
 
 # ================= 1. 配置区域 =================
-# JSON 文件绝对路径
+# 【数据源选择】设置为 'json' 或 'csv'
+DATA_SOURCE = 'csv'  # 'json' 或 'csv'
+
+# JSON 文件绝对路径（当 DATA_SOURCE = 'json' 时使用）
 JSON_PATH = '/Users/10294814/task/cldfeed/abner/data_clean/data_cldfeed/cld_bottle_black_audit_datas/cld_bottle_black_audit_datas.json'
 
-# 图片文件夹绝对路径
-IMG_DIR = '/Users/10294814/task/cldfeed/abner/data_clean/data_cldfeed/cld_bottle_black_audit_datas/cld_bottle_black_audit_datas_download'
+# CSV 文件绝对路径（当 DATA_SOURCE = 'csv' 时使用）
+CSV_PATH = '/Users/10294814/task/datadownload/inference_results_0212.csv'
 
-# 定义标签类别
+# 图片文件夹绝对路径
+# IMG_DIR = '/Users/10294814/task/cldfeed/abner/data_clean/data_cldfeed/cld_bottle_black_audit_datas/cld_bottle_black_audit_datas_download'
+IMG_DIR = '/Users/10294814/task/datadownload/realdata_high_0208_predict_black'
+
+# 【新增】CSV模式下，筛选要显示的预测类别（prediction字段的值）
+# 例如：['Black'] 只显示Black类别
+#      ['Black', 'White'] 显示Black和White两种类别
+#      [] 或 None 表示显示所有类别
+FILTER_PREDICTIONS = ['Black']  # 可设置为 ['Black', 'White'] 等多个类别
+
+# 【新增】是否按置信度从高到低排序
+# True: 按 confidence 分数从高到低排序显示
+# False: 保持原始顺序（随机）
+SORT_BY_CONFIDENCE = True
+
+# 定义人工标注的标签类别
+# LABELS = [
+#     "cld_bottle_clip",
+#     "cld_bottle_pillow",
+#     "cld_bottle_straw",
+#     "white",
+#     "uncertain",
+#     "black",
+# ]
 LABELS = [
-    "cld_bottle_clip",
-    "cld_bottle_pillow",
-    "cld_bottle_straw",
     "white",
     "uncertain",
     "black",
@@ -110,6 +134,26 @@ HTML_TEMPLATE = """
             line-height: 1.4;
         }
 
+        /* 分数显示区域 */
+        .score-box {
+            font-size: 11px; background: #fff3cd; border: 1px solid #ffc107;
+            padding: 6px 8px; border-radius: 4px; margin-bottom: 8px;
+            display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
+        }
+        .score-item {
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .score-label {
+            color: #856404; font-weight: 600;
+        }
+        .score-value {
+            background: white; padding: 2px 6px; border-radius: 3px;
+            font-family: 'Courier New', monospace; font-weight: bold;
+        }
+        .score-value.high { color: #d32f2f; }
+        .score-value.medium { color: #f57c00; }
+        .score-value.low { color: #388e3c; }
+
         /* 标签按钮组 */
         .btn-group { 
             display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: auto; 
@@ -128,8 +172,9 @@ HTML_TEMPLATE = """
         .btn[data-label="cld_bottle_clip"].active { background-color: #3498db; }
         .btn[data-label="cld_bottle_pillow"].active { background-color: #9b59b6; }
         .btn[data-label="cld_bottle_straw"].active { background-color: #e67e22; }
-        .btn[data-label="white"].active { background-color: #95a5a6; }
+        .btn[data-label="white"].active { background-color: #31a5a1; }
         .btn[data-label="uncertain"].active { background-color: #e74c3c; }
+        .btn[data-label="black"].active { background-color: #2c3e50; }
 
         /* 复制成功提示 Toast */
         #toast {
@@ -147,7 +192,7 @@ HTML_TEMPLATE = """
 <body>
 
 <div class="header">
-    <h3 style="margin:0; color:#2c3e50;">X Label Tool v3.1</h3>
+    <h3 style="margin:0; color:#2c3e50;">X Label Tool v3.2 - CSV模式</h3>
     <div class="stats">
         总数: <span id="total">0</span> |
         已标: <span id="labeled" class="done">0</span> |
@@ -179,10 +224,10 @@ HTML_TEMPLATE = """
         let html = '';
 
         allData.forEach((item, index) => {
-            const url = item.img_orgn_url || "";
-            const filename = url.split('/').pop() || "unknown.jpg";
+            const url = item.img_orgn_url || item.filename || "";
+            const filename = url.split('/').pop() || item.filename || "unknown.jpg";
             const desc = item.goods_desc || "暂无描述";
-            
+
             // 状态判断
             const currentLabel = item.human_label;
             const cardClass = currentLabel ? 'card labeled' : 'card';
@@ -191,12 +236,51 @@ HTML_TEMPLATE = """
             let btnsHtml = '';
             LABELS.forEach(lbl => {
                 const activeClass = (currentLabel === lbl) ? 'active' : '';
-                btnsHtml += `<div class="btn ${activeClass}" 
-                                  data-label="${lbl}" 
+                btnsHtml += `<div class="btn ${activeClass}"
+                                  data-label="${lbl}"
                                   onclick="setLabel(${index}, '${lbl}')">
                                 ${lbl}
                              </div>`;
             });
+
+            // 生成分数显示区域（如果有分数数据）
+            let scoreHtml = '';
+            if (item.black_score !== undefined || item.white_score !== undefined || item.confidence !== undefined) {
+                scoreHtml = '<div class="score-box">';
+
+                if (item.prediction !== undefined) {
+                    scoreHtml += `<div class="score-item" style="grid-column: 1/-1;">
+                        <span class="score-label">预测:</span>
+                        <span class="score-value">${item.prediction}</span>
+                    </div>`;
+                }
+
+                if (item.confidence !== undefined) {
+                    const confClass = item.confidence > 0.8 ? 'high' : (item.confidence > 0.5 ? 'medium' : 'low');
+                    scoreHtml += `<div class="score-item" style="grid-column: 1/-1;">
+                        <span class="score-label">置信度:</span>
+                        <span class="score-value ${confClass}">${parseFloat(item.confidence).toFixed(3)}</span>
+                    </div>`;
+                }
+
+                if (item.black_score !== undefined) {
+                    const blackClass = item.black_score > 0.7 ? 'high' : (item.black_score > 0.3 ? 'medium' : 'low');
+                    scoreHtml += `<div class="score-item">
+                        <span class="score-label">Black:</span>
+                        <span class="score-value ${blackClass}">${parseFloat(item.black_score).toFixed(3)}</span>
+                    </div>`;
+                }
+
+                if (item.white_score !== undefined) {
+                    const whiteClass = item.white_score > 0.7 ? 'high' : (item.white_score > 0.3 ? 'medium' : 'low');
+                    scoreHtml += `<div class="score-item">
+                        <span class="score-label">White:</span>
+                        <span class="score-value ${whiteClass}">${parseFloat(item.white_score).toFixed(3)}</span>
+                    </div>`;
+                }
+
+                scoreHtml += '</div>';
+            }
 
             html += `
                 <div class="${cardClass}" id="card-${index}">
@@ -205,15 +289,17 @@ HTML_TEMPLATE = """
                     </div>
                     <div class="content">
                         <!-- 点击复制文件名 -->
-                        <div class="filename copyable" 
-                             onclick="copyText('${filename}')" 
+                        <div class="filename copyable"
+                             onclick="copyText('${filename}')"
                              title="${filename}">
                              ${filename}
                         </div>
-                        
+
+                        ${scoreHtml}
+
                         <!-- 点击复制商品描述 -->
-                        <div class="desc-box copyable" 
-                             onclick="copyText(this.innerText)" 
+                        <div class="desc-box copyable"
+                             onclick="copyText(this.innerText)"
                              title="点击复制描述">
                              ${desc}
                         </div>
@@ -295,23 +381,100 @@ HTML_TEMPLATE = """
 json_data = []
 
 def load_json():
+    """加载JSON格式数据"""
     global json_data
     if os.path.exists(JSON_PATH):
         try:
             with open(JSON_PATH, 'r', encoding='utf-8') as f:
                 json_data = json.load(f)
-                print(f"[INFO] 成功加载 {len(json_data)} 条数据")
+                print(f"[INFO] 成功加载 {len(json_data)} 条JSON数据")
         except Exception as e:
             print(f"[ERROR] JSON 读取失败: {e}")
     else:
         print(f"[ERROR] 文件未找到: {JSON_PATH}")
 
 def save_json():
+    """保存JSON格式数据"""
     try:
         with open(JSON_PATH, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, ensure_ascii=False, indent=4)
     except Exception as e:
         print(f"[ERROR] 保存失败: {e}")
+
+def load_csv():
+    """加载CSV格式数据，并根据FILTER_PREDICTIONS筛选"""
+    global json_data
+    if not os.path.exists(CSV_PATH):
+        print(f"[ERROR] 文件未找到: {CSV_PATH}")
+        return
+
+    try:
+        with open(CSV_PATH, 'r', encoding='utf-8', errors='ignore') as f:
+            reader = csv.DictReader(f)
+            all_rows = list(reader)
+
+            # 应用类别筛选
+            if FILTER_PREDICTIONS and len(FILTER_PREDICTIONS) > 0:
+                filtered_rows = [row for row in all_rows if row.get('prediction', '').strip() in FILTER_PREDICTIONS]
+                print(f"[INFO] 原始数据: {len(all_rows)} 条")
+                print(f"[INFO] 筛选类别: {FILTER_PREDICTIONS}")
+                print(f"[INFO] 筛选后数据: {len(filtered_rows)} 条")
+                json_data = filtered_rows
+            else:
+                json_data = all_rows
+                print(f"[INFO] 成功加载 {len(json_data)} 条CSV数据（未筛选）")
+
+            # 转换数据类型（将分数转为浮点数）
+            for item in json_data:
+                for key in ['confidence', 'black_score', 'white_score']:
+                    if key in item and item[key]:
+                        try:
+                            item[key] = float(item[key])
+                        except ValueError:
+                            item[key] = 0.0
+
+            # 【新增】按置信度排序（如果开启）
+            if SORT_BY_CONFIDENCE:
+                json_data.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+                print(f"[INFO] 已按置信度从高到低排序")
+
+    except Exception as e:
+        print(f"[ERROR] CSV 读取失败: {e}")
+
+def save_csv():
+    """保存CSV格式数据，写回时添加human_label列"""
+    try:
+        if not json_data:
+            print("[WARN] 没有数据可保存")
+            return
+
+        # 获取所有字段名（确保包含human_label）
+        fieldnames = list(json_data[0].keys())
+        if 'human_label' not in fieldnames:
+            fieldnames.append('human_label')
+
+        with open(CSV_PATH, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(json_data)
+
+        print(f"[INFO] 成功保存 {len(json_data)} 条数据到 {CSV_PATH}")
+    except Exception as e:
+        print(f"[ERROR] CSV 保存失败: {e}")
+
+def load_data():
+    """根据配置加载数据"""
+    if DATA_SOURCE == 'csv':
+        load_csv()
+    else:
+        load_json()
+
+def save_data():
+    """根据配置保存数据"""
+    if DATA_SOURCE == 'csv':
+        save_csv()
+    else:
+        save_json()
 
 @app.route('/')
 def index():
@@ -325,9 +488,15 @@ def get_data():
 def get_image(index):
     if 0 <= index < len(json_data):
         item = json_data[index]
+
+        # 优先从 img_orgn_url 获取，否则从 filename 获取
         url = item.get('img_orgn_url', '')
         if url:
             filename = os.path.basename(url)
+        else:
+            filename = item.get('filename', '')
+
+        if filename:
             local_path = os.path.join(IMG_DIR, filename)
             if os.path.exists(local_path):
                 return send_file(local_path)
@@ -342,7 +511,7 @@ def update_label():
     label = req.get('label')
     if idx is not None and 0 <= idx < len(json_data):
         json_data[idx]['human_label'] = label
-        save_json()
+        save_data()  # 使用统一的保存函数
         return jsonify({"success": True})
     return jsonify({"success": False}), 400
 
@@ -351,17 +520,24 @@ def check_port(port):
         return s.connect_ex(('localhost', port)) != 0
 
 if __name__ == '__main__':
-    load_json()
-    
+    load_data()
+
     # 自动选择端口，优先5000，如果占用则尝试5001
     PORT = 5000
     if not check_port(PORT):
         print(f"[WARN] 端口 {PORT} 被占用，尝试使用 5001...")
         PORT = 5001
-    
+
     print("--------------------------------------------------")
     print(f"服务启动中...")
-    print(f"数据路径: {JSON_PATH}")
+    print(f"数据源类型: {DATA_SOURCE.upper()}")
+    if DATA_SOURCE == 'csv':
+        print(f"CSV路径: {CSV_PATH}")
+        print(f"筛选类别: {FILTER_PREDICTIONS if FILTER_PREDICTIONS else '全部'}")
+        print(f"置信度排序: {'开启' if SORT_BY_CONFIDENCE else '关闭'}")
+    else:
+        print(f"JSON路径: {JSON_PATH}")
+    print(f"图片文件夹: {IMG_DIR}")
     print(f"请访问: http://127.0.0.1:{PORT}")
     print("--------------------------------------------------")
     app.run(host='0.0.0.0', port=PORT, debug=True)
